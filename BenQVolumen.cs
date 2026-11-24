@@ -58,6 +58,7 @@ class App
     IntPtr phys = IntPtr.Zero;
     Rectangle benqArea = Screen.PrimaryScreen.WorkingArea;
     float benqScale = 1f;
+    int lastVolume = 0, lastMax = 50; // último volumen leído sin silencio
 
     public App()
     {
@@ -185,24 +186,41 @@ class App
         bool show = showRequested; showRequested = false;
         if (!toggleMute && delta == 0 && !show) return;
 
-        if (!Get(0x62, out cur, out max))
+        if (!Get(0x8D, out mute, out mmax))
         {
             ResetMonitor();
-            if (!EnsureMonitor() || !Get(0x62, out cur, out max)) return;
+            if (!EnsureMonitor() || !Get(0x8D, out mute, out mmax)) return;
         }
-        bool muted = Get(0x8D, out mute, out mmax) && mute == 1;
+        bool muted = mute == 1;
 
+        // Ojo: mientras está silenciado, el BenQ informa de volumen 0 en 0x62.
+        // Por eso primero se ajusta el silencio y después se lee el volumen.
         if (toggleMute)
         {
             muted = !muted;
             Native.SetVCPFeature(phys, 0x8D, muted ? 1u : 2u);
         }
-        if (delta != 0)
+        if (delta != 0 && muted)
         {
-            int nv = Math.Max(0, Math.Min((int)max, (int)cur + delta));
-            if (nv != (int)cur) Native.SetVCPFeature(phys, 0x62, (uint)nv);
-            cur = (uint)nv;
-            if (muted) { Native.SetVCPFeature(phys, 0x8D, 2u); muted = false; } // como Windows: subir/bajar quita el silencio
+            Native.SetVCPFeature(phys, 0x8D, 2u); // como Windows: subir/bajar quita el silencio
+            muted = false;
+        }
+
+        if (muted)
+        {
+            // Silenciado: se muestra el último volumen conocido (barra en gris).
+            cur = (uint)lastVolume; max = (uint)lastMax;
+        }
+        else
+        {
+            if (!Get(0x62, out cur, out max)) return;
+            if (delta != 0)
+            {
+                int nv = Math.Max(0, Math.Min((int)max, (int)cur + delta));
+                if (nv != (int)cur) Native.SetVCPFeature(phys, 0x62, (uint)nv);
+                cur = (uint)nv;
+            }
+            lastVolume = (int)cur; lastMax = (int)max;
         }
 
         int v = (int)cur, m = (int)max; bool mu = muted; Rectangle area = benqArea; float sc = benqScale;
