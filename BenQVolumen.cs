@@ -22,11 +22,27 @@ static class Program
             if (!created) return;
             // Sin esto Windows estira la ventana como un bitmap cuando hay escalado (>100 %) y se ve borrosa.
             try { Native.SetProcessDpiAwarenessContext(new IntPtr(-3) /*PER_MONITOR_AWARE*/); } catch { }
+            // Si algo falla, queda anotado en %LOCALAPPDATA%\BenQVolumen\error.log
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { LogError(e.Exception); };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { LogError(e.ExceptionObject as Exception); };
             Application.EnableVisualStyles();
             var app = new App();
             Application.Run();
             GC.KeepAlive(app);
         }
+    }
+
+    public static void LogError(Exception ex)
+    {
+        try
+        {
+            string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BenQVolumen");
+            System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "error.log"),
+                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + ex + Environment.NewLine + Environment.NewLine);
+        }
+        catch { }
     }
 }
 
@@ -45,7 +61,8 @@ class App
     readonly SynchronizationContext ui;
     readonly System.Windows.Forms.Timer audioTimer;
     readonly Native.LowLevelKeyboardProc hookProc; // referencia viva para el GC
-    readonly IntPtr hook;
+    IntPtr hook;
+    int ticks;
     readonly AutoResetEvent signal = new AutoResetEvent(false);
     readonly ToolStripMenuItem miAuto, miAlways, miOff, miStartup;
 
@@ -92,7 +109,13 @@ class App
 
         audioTimer = new System.Windows.Forms.Timer();
         audioTimer.Interval = 2000;
-        audioTimer.Tick += delegate { RefreshAudio(); };
+        audioTimer.Tick += delegate
+        {
+            RefreshAudio();
+            // Windows quita los hooks de teclado sin avisar si alguna vez tardan en responder;
+            // reinstalarlo periódicamente evita que la rueda "vuelva" a Windows.
+            if (++ticks % 15 == 0) InstallHook();
+        };
         audioTimer.Start();
         RefreshAudio();
         UpdateMenu();
@@ -102,9 +125,18 @@ class App
         worker.Start();
 
         hookProc = HookCallback;
-        hook = Native.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, hookProc, Native.GetModuleHandle(null), 0);
+        InstallHook();
         if (hook == IntPtr.Zero)
             MessageBox.Show("No se pudo instalar el hook de teclado.", "BenQ Volumen");
+    }
+
+    void InstallHook()
+    {
+        IntPtr nh = Native.SetWindowsHookEx(13 /*WH_KEYBOARD_LL*/, hookProc, Native.GetModuleHandle(null), 0);
+        if (nh == IntPtr.Zero) return;
+        IntPtr old = hook;
+        hook = nh;
+        if (old != IntPtr.Zero) Native.UnhookWindowsHookEx(old);
     }
 
     // ---------- Modo / estado ----------
@@ -172,7 +204,7 @@ class App
         {
             signal.WaitOne();
             try { Apply(); }
-            catch { ResetMonitor(); }
+            catch (Exception ex) { Program.LogError(ex); ResetMonitor(); }
         }
     }
 
